@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import re
+import argparse
+from icecream import ic
+from subprocess import check_output
+import asyncio
+from typing import List, Tuple
+
+
+class ProcessMonitor:
+    def __init__(self, num_target: int, delay: float = 0.1) -> None:
+        self.num_target = num_target
+        self.process_list = self.get_ps()
+        self.delay = delay
+        self.num_done = 0
+
+    def report_done(self):
+        self.num_done += 1
+
+    async def run(self):
+        while self.num_done < self.num_target:
+            self.process_list = list(self.get_ps())
+            await asyncio.sleep(self.delay)
+
+    @classmethod
+    def get_ps(cls):
+        for line in check_output(["ps", "-ef"]).decode().split("\n"):
+            yield (" ".join(re.split(r"\s{1,}", line)[7:8])).lower()
+
+
+def key_value_pair(string: str):
+    """
+    Validate a key value pair that is in the form of key=vale
+    """
+    key_value = string.split("=")
+    if len(key_value) < 2:
+        raise ValueError(
+            "Must be in the form of key=value"
+        )  # or TypeError, or `argparse.ArgumentTypeError
+    return key_value[0], "".join(key_value[1:])
+
+
+def key_value_pair_float(string: str):
+    out = key_value_pair(string)
+    return out[0], float(out[1])
+
+
+def key_value_pair_int(string: str):
+    out = key_value_pair(string)
+    return out[0], int(out[1])
+
+
+parser = argparse.ArgumentParser(
+    prog="command_runner",
+)
+parser.add_argument(
+    "-d",
+    "--delay",
+    type=key_value_pair_float,
+    action="append",
+    default=[],
+    help="set custom variable SUBSTR=DELAY",
+)
+parser.add_argument(
+    "-r",
+    "--repeat",
+    type=key_value_pair_int,
+    default=[],
+    action="append",
+)
+parser.add_argument(
+    "-i",
+    "--process-name-idx",
+    type=int,
+    default=0,
+)
+parser.add_argument(
+    "-np",
+    "--no-pop-after",
+    action='store_true',
+)
+
+
+async def monitor_process(
+    my_p_name: str,
+    command: str,
+    process_monitor: ProcessMonitor,
+    delay_before_executing: float = 1,
+    delay_between_check: float = 0.2,
+    repeat: int = 1,
+):
+    _my_p_name_lower = my_p_name.lower()
+
+    for custom_delay in ARGS.delay:
+        if custom_delay[0].lower() in _my_p_name_lower:
+            delay_before_executing = custom_delay[1]
+            break
+    for custom_repeat in ARGS.repeat:
+        if custom_repeat[0].lower() in _my_p_name_lower:
+            repeat = custom_repeat[1]
+            break
+
+    executed_count = 0
+
+    while True:
+        for p in process_monitor.process_list:
+            if _my_p_name_lower in p:
+                if executed_count <= 0:
+                    print(f"> [{my_p_name}] Found.")
+                await asyncio.sleep(delay_before_executing)
+                executed_count += 1
+                print(f"> [{my_p_name}] Executing {executed_count}/{repeat}: {command}")
+                os.system(command)
+
+                if executed_count >= repeat:
+                    process_monitor.report_done()
+                    return
+                break
+        await asyncio.sleep(delay_between_check)
+
+
+async def main(processes_to_monitor: List[Tuple[str, str]]):
+    process_monitor = ProcessMonitor(len(processes_to_monitor))
+
+    tasks = [asyncio.create_task(process_monitor.run())]
+
+    for _name, _cmd in processes_to_monitor:
+        tasks.append(asyncio.create_task(monitor_process(_name, _cmd, process_monitor)))
+    for t in tasks:
+        await t
+
+
+if __name__ == "__main__":
+    ARGS = parser.parse_args()
+
+    processes_to_monitor = []
+    for line in sys.stdin:
+        line = line.strip()
+        if len(line) > 0:
+            parts = line.split(" ")
+            process_name = parts[ARGS.process_name_idx]
+            if not ARGS.no_pop_after:
+                parts.pop(ARGS.process_name_idx)
+            processes_to_monitor.append((process_name, " ".join(parts)))
+
+    asyncio.run(
+        main(
+            processes_to_monitor,
+        )
+    )
